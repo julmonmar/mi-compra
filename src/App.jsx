@@ -198,9 +198,11 @@ export default function App() {
 
     // Productos manuales: marcados en checks, no favoritos, no en menú actual
     // y no tachados en el supermercado
+    const mapaActual  = calcMapaMenu(semanas[idxSemana % Math.max(semanas.length,1)] || semanas[0], platos, productos, quitados);
+    const idsMenuActual = new Set(Object.keys(mapaActual));
     const idsTachados = new Set(listaSuper.filter(p=>p.comprado).map(p=>p.id));
     const manualesVivos = productos.filter(prod => {
-      const esManual = checks[prod.id] === true && !idsFav.has(prod.id) && !Object.keys(calcMapaMenu(semana, platos, productos, quitados)).includes(prod.id);
+      const esManual = checks[prod.id] === true && !idsFav.has(prod.id) && !idsMenuActual.has(prod.id);
       const noTachado = !idsTachados.has(prod.id);
       return esManual && noTachado;
     }).map(prod => ({
