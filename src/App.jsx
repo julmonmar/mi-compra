@@ -1,4 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { db } from "./firebase";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
 
 const CATEGORIAS = [
   "Frutas y verduras","Carnes y embutidos","Pescados y mariscos",
@@ -77,8 +79,19 @@ const SEMANAS_INIT = [
 ];
 
 // ─── STORAGE ──────────────────────────────────────────────────────────────────
-async function guardar(k,v){try{await window.storage.set(k,JSON.stringify(v));}catch{}}
-async function cargar(k,d){try{const r=await window.storage.get(k);return r?JSON.parse(r.value):d;}catch{return d;}}
+const DOC_ID = "familia";
+const guardandoRef = { current: false };
+const timerRef = { current: null };
+
+function guardarFirebase(estado) {
+  if (timerRef.current) clearTimeout(timerRef.current);
+  timerRef.current = setTimeout(() => {
+    guardandoRef.current = true;
+    setDoc(doc(db, "compra", DOC_ID), estado).finally(() => {
+      setTimeout(() => { guardandoRef.current = false; }, 500);
+    });
+  }, 800);
+}
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 function fmt(cantidad, unidad) {
@@ -128,56 +141,142 @@ export default function App() {
   const [semanas,       setSemanas]       = useState(SEMANAS_INIT);
   const [idxSemana,     setIdxSemana]     = useState(0);
   const [quitados,      setQuitados]      = useState([]);
-  const [checks,        setChecks]        = useState({}); // { pid: bool }
+  const [checks,        setChecks]        = useState({});
   const [listaSuper,    setListaSuper]    = useState([]);
+  const [manuales,      setManuales]      = useState([]);
   const [cargado,       setCargado]       = useState(false);
+  const estadoRef = useRef({});
 
-  // ── Carga ──
+  // ── Carga desde Firebase ──
   useEffect(() => {
-    (async () => {
-      const pr = await cargar("mc_productos",  PRODUCTOS_INIT);
-      const pl = await cargar("mc_platos",  PLATOS_INIT);
-      const se = await cargar("mc_semanas",   SEMANAS_INIT);
-      const ix = await cargar("mc_idx",   0);
-      const qu = await cargar("mc_quitados",  []);
-      const ch = await cargar("mc_checks",   {});
-      const ls = await cargar("mc_super",   []);
-      const pa = await cargar("mc_pantalla",   "lista");
-      setProductos(pr); setPlatos(pl); setSemanas(se);
-      setIdxSemana(ix); setQuitados(qu); setChecks(ch);
-      setListaSuper(ls);
-      setPantalla(pa==="super" && ls.length > 0 ? "super" : "lista");
+    const ref = doc(db, "compra", DOC_ID);
+    const unsub = onSnapshot(ref, (snap) => {
+      if (guardandoRef.current) return;
+      if (snap.exists()) {
+        const d = snap.data();
+        if (d.productos)  setProductos(d.productos);
+        if (d.platos)     setPlatos(d.platos);
+        if (d.semanas)    setSemanas(d.semanas);
+        if (d.idxSemana !== undefined) setIdxSemana(d.idxSemana);
+        if (d.quitados)   setQuitados(d.quitados);
+        if (d.checks)     setChecks(d.checks);
+        if (d.listaSuper) setListaSuper(d.listaSuper);
+        if (d.manuales)   setManuales(d.manuales||[]);
+        const pa = d.pantalla || "lista";
+        setPantalla(pa==="super" && (d.listaSuper||[]).length>0 ? "super" : pa==="ajustes" ? "ajustes" : "lista");
+      } else {
+        const inicial = {
+          pantalla:"lista", productos:PRODUCTOS_INIT, platos:PLATOS_INIT,
+          semanas:SEMANAS_INIT, idxSemana:0, quitados:[], checks:{},
+          listaSuper:[], manuales:[],
+        };
+        setDoc(ref, inicial);
+      }
       setCargado(true);
-    })();
+    });
+    return () => unsub();
   }, []);
 
-  useEffect(()=>{ if(cargado) guardar("mc_productos",  productos);     },[productos,  cargado]);
-  useEffect(()=>{ if(cargado) guardar("mc_platos",  platos);        },[platos,     cargado]);
-  useEffect(()=>{ if(cargado) guardar("mc_semanas",   semanas);       },[semanas,    cargado]);
-  useEffect(()=>{ if(cargado) guardar("mc_idx",   idxSemana);     },[idxSemana,  cargado]);
-  useEffect(()=>{ if(cargado) guardar("mc_quitados",  quitados);      },[quitados,   cargado]);
-  useEffect(()=>{ if(cargado) guardar("mc_checks",   checks);        },[checks,     cargado]);
-  useEffect(()=>{ if(cargado) guardar("mc_super",   listaSuper);    },[listaSuper, cargado]);
-  useEffect(()=>{ if(cargado) guardar("mc_pantalla",   pantalla);      },[pantalla,   cargado]);
+  // ── Guardar en Firebase cuando cambia el estado ──
+  useEffect(() => {
+    if (!cargado) return;
+    const estado = {
+      pantalla, productos, platos, semanas, idxSemana,
+      quitados, checks, listaSuper, manuales,
+    };
+    guardarFirebase(estado);
+  }, [pantalla, productos, platos, semanas, idxSemana, quitados, checks, listaSuper, manuales, cargado]);
 
   const semana = semanas[idxSemana % Math.max(semanas.length,1)] || semanas[0];
 
   function rotarSemana() {
-    setIdxSemana(i=>(i+1) % semanas.length);
+    const nuevaIdx   = (idxSemana + 1) % semanas.length;
+    const nuevaSemana= semanas[nuevaIdx % Math.max(semanas.length,1)] || semanas[0];
+    const nuevoMapa  = calcMapaMenu(nuevaSemana, platos, productos, []);
+    const idsNuevoMenu = new Set(Object.keys(nuevoMapa));
+    const idsFav     = new Set(productos.filter(p=>p.favorito).map(p=>p.id));
+
+    // Productos manuales: marcados en checks, no favoritos, no en menú actual
+    // y no tachados en el supermercado
+    const idsTachados = new Set(listaSuper.filter(p=>p.comprado).map(p=>p.id));
+    const manualesVivos = productos.filter(prod => {
+      const esManual = checks[prod.id] === true && !idsFav.has(prod.id) && !Object.keys(calcMapaMenu(semana, platos, productos, quitados)).includes(prod.id);
+      const noTachado = !idsTachados.has(prod.id);
+      return esManual && noTachado;
+    }).map(prod => ({
+      id: prod.id, nombre: prod.nombre, cantidad: 1,
+      unidad: prod.unidad, categoria: prod.categoria,
+      comprado: false, manual: true,
+    }));
+
+    const idsYaEnLista = new Set(manualesVivos.map(p=>p.id));
+
+    // Nueva lista base: menú nuevo + favoritos
+    const nuevaLista = [];
+    productos.forEach(prod => {
+      const enMenu = nuevoMapa[prod.id];
+      const esFav  = prod.favorito;
+      if ((enMenu || esFav) && !idsYaEnLista.has(prod.id)) {
+        nuevaLista.push({
+          id: prod.id, nombre: prod.nombre,
+          cantidad: enMenu ? enMenu.cantidad : (parseFloat(prod.cantidadFav)||1),
+          unidad: prod.unidad, categoria: prod.categoria,
+          comprado: false, manual: false,
+        });
+      }
+    });
+
+    // Preservar checks manuales vivos para la nueva semana
+    const nuevosChecks = {};
+    manualesVivos.forEach(p => { nuevosChecks[p.id] = true; });
+
+    setIdxSemana(nuevaIdx);
     setQuitados([]);
-    setChecks({});
-    setListaSuper([]);
+    setChecks(nuevosChecks);
+    setListaSuper([...manualesVivos, ...nuevaLista]);
+    setManuales(manualesVivos.map(p=>p.id));
   }
 
   function toggleCheck(pid) {
-    // Si no está en checks, el valor actual es true (activo por defecto)
-    // así que al togglear debe pasar a false
+    const mapaMenu  = calcMapaMenu(semana, platos, productos, quitados);
     const idsActivos = new Set([
-      ...Object.keys(calcMapaMenu(semana, platos, productos, quitados)),
+      ...Object.keys(mapaMenu),
       ...productos.filter(p=>p.favorito).map(p=>p.id)
     ]);
     const actual = checks[pid] !== undefined ? checks[pid] : idsActivos.has(pid);
-    setChecks(ch=>({...ch,[pid]:!actual}));
+    const nuevoValor = !actual;
+    const prod = productos.find(p=>p.id===pid);
+    if (!prod) return;
+    const esFav    = prod.favorito;
+    const enMenu   = mapaMenu[pid];
+    const esManual = !enMenu && !esFav;
+
+    setChecks(ch=>({...ch,[pid]:nuevoValor}));
+
+    // Actualizar estado manuales siempre (independiente del supermercado)
+    if (esManual) {
+      if (nuevoValor) {
+        setManuales(m=>[...new Set([...m, pid])]);
+      } else {
+        setManuales(m=>m.filter(id=>id!==pid));
+      }
+    }
+
+    // Sincronizar listaSuper si está activa
+    if (listaSuper.length > 0) {
+      if (nuevoValor) {
+        if (!listaSuper.find(p=>p.id===pid)) {
+          setListaSuper(l=>[...l, {
+            id: prod.id, nombre: prod.nombre,
+            cantidad: enMenu ? enMenu.cantidad : 1,
+            unidad: prod.unidad, categoria: prod.categoria,
+            comprado: false, manual: esManual,
+          }]);
+        }
+      } else {
+        setListaSuper(l=>l.filter(p=>!(p.id===pid && !p.comprado)));
+      }
+    }
   }
 
   function quitarPlato(platId, tipo) {
@@ -204,6 +303,7 @@ export default function App() {
     productos.forEach(prod => {
       const enMenu  = mapaMenu[prod.id];
       const esFav   = prod.favorito;
+      const esManual = !enMenu && !esFav && checks[prod.id] === true;
       const checked = checks[prod.id] !== undefined ? checks[prod.id] : (!!enMenu || esFav);
       if (checked) {
         lista.push({
@@ -213,6 +313,7 @@ export default function App() {
           unidad: prod.unidad,
           categoria: prod.categoria,
           comprado: false,
+          manual: esManual,
         });
       }
     });
