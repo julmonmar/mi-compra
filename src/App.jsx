@@ -230,11 +230,25 @@ export default function App() {
     const nuevosChecks = {};
     manualesVivos.forEach(p => { nuevosChecks[p.id] = true; });
 
+    const nuevosIds = manualesVivos.map(p=>p.id);
+    const nuevaListaSuper = [...manualesVivos, ...nuevaLista];
+
     setIdxSemana(nuevaIdx);
     setQuitados([]);
     setChecks(nuevosChecks);
-    setListaSuper([...manualesVivos, ...nuevaLista]);
-    setManuales(manualesVivos.map(p=>p.id));
+    setListaSuper(nuevaListaSuper);
+    setManuales(nuevosIds);
+
+    // Guardar inmediatamente en Firebase sin esperar el debounce
+    const ref = doc(db, "compra", DOC_ID);
+    setDoc(ref, {
+      pantalla, productos, platos, semanas,
+      idxSemana: nuevaIdx,
+      quitados: [],
+      checks: nuevosChecks,
+      listaSuper: nuevaListaSuper,
+      manuales: nuevosIds,
+    });
   }
 
   function toggleCheck(pid) {
